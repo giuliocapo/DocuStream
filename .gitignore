@@ -1,0 +1,19 @@
+# User data & secrets (never publish)
+config.json
+recordings/
+docustream_crash.log
+
+# Downloaded runtime (rebuilt by bootstrap_portable.bat)
+runtime/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Test/OS leftovers
+_selftest.py
+_e2e.py
+_btntest.py
+_uisshot*.png
+_shot.ps1
+Thumbs.db
