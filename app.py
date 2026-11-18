@@ -70,6 +70,26 @@ STATE_COLORS = {
 
 FONT = "Segoe UI"
 
+# Clipboard helper for building a concise Whisper biasing prompt from private
+# project documents with whichever LLM the user already trusts. No PDF content
+# is read, uploaded, or transmitted by DocuStream itself.
+PDF_EXTRACTION_PROMPT = """Analyze the project PDF documents I attach to this chat.
+Create a Whisper initial_prompt containing only the domain vocabulary needed to
+transcribe meetings about these documents accurately.
+
+Include:
+- exact product, project, company, and personal names;
+- technical terms, acronyms, abbreviations, model numbers, and units;
+- common Italian/English mixed-language terminology when present;
+- a few short example phrases showing ambiguous acronyms in context.
+
+Exclude explanations, definitions, confidential document passages, and generic
+meeting phrases. Preserve exact capitalization and spelling. Use one compact,
+comma-separated vocabulary list followed by at most two short example phrases.
+Keep the complete result below 150 words. Return only the prompt text, ready to
+paste into DocuStream Settings > Whisper Initial Prompt.
+"""
+
 
 def _font(size=13, weight="normal", family=FONT):
     return ctk.CTkFont(family=family, size=size, weight=weight)
@@ -101,12 +121,14 @@ GUIDE_BLOCKS = [
                      "more accurate later."),
             ("step", "Click ● Start Recording. DocuStream captures BOTH the "
                      "system output (what Teams/Zoom/Meet play through your "
-                     "speakers) AND your physical microphone, mixed into one "
-                     "clean WAV."),
-            ("step", "When the call ends, click ■ Finish & Process. "
-                     "faster-whisper transcribes the audio completely offline "
-                     "and writes a .md file into the recordings/ folder, next "
-                     "to the .wav."),
+                     "speakers) AND your physical microphone into a 24 kHz "
+                     "16-bit stereo WAV. Left is your microphone; right is "
+                     "the remote callers - the channels are never mixed."),
+            ("step", "When the call ends, click ■ Finish & Process. One shared "
+                     "faster-whisper model transcribes each channel offline, "
+                     "labels 'Tu' and 'Teams / Interlocutori', merges both "
+                     "streams chronologically, and writes a .md file into the "
+                     "recordings/ folder next to the .wav."),
             ("bullet", "Discard Call deletes the recording immediately and "
                        "skips everything."),
             ("bullet", "Save Audio Only keeps the raw .wav without running "
@@ -157,30 +179,58 @@ GUIDE_BLOCKS = [
     {
         "type": "card",
         "icon": "🕰",
-        "title": "Chronological RAG - why ISO timestamps matter",
+        "title": "Chronological RAG - every chunk keeps its date",
         "body": [
-            ("text", "Every transcript carries an ISO 8601 frontmatter "
-                     "header, and every utterance keeps its own "
-                     "[HH:MM:SS - HH:MM:SS] window:"),
+            ("text", "Every transcript has strict ISO 8601 'published' and "
+                     "DATE_ISO values, an English/Italian DATE_HUMAN label, "
+                     "and per-utterance [MM:SS - MM:SS] windows. Long files "
+                     "also repeat a compact anchor every logical block (at "
+                     "most 15 utterances or ~300 words), because AnythingLLM "
+                     "chunks after the YAML header would otherwise lose it:"),
             ("code", "---\n"
-                     "TITLE: Meeting Transcript - Project Alpha\n"
-                     "DATE_ISO: 2026-11-04T14:32:10\n"
+                     "published: 2026-11-13T14:32:10\n"
+                     "DATE_ISO: 2026-11-13T14:32:10\n"
+                     "DATE_HUMAN: Friday 13 November 2026 / Venerdì 13 "
+                     "Novembre 2026\n"
                      "PROJECT: Project Alpha\n"
-                     "DURATION_MIN: 47.5\n"
-                     "ENGINE: faster-whisper-small\n"
-                     "SOURCE: DocuStream WASAPI Dual Capture\n"
-                     "---"),
-            ("text", "When LanceDB embeds these documents, the LLM can ORDER "
-                     "the meetings in time. That matters enormously:"),
-            ("bullet", "Week 1: \"The deadline is March 1st.\""),
-            ("bullet", "Week 3: \"Decision changed - the deadline moved to "
-                       "April 15th.\""),
-            ("text", "Without chronological grounding the LLM retrieves both "
-                     "statements and may hallucinate a blended, wrong "
-                     "answer. With explicit DATE_ISO anchors, the retriever "
-                     "prefers the NEWEST decision: \"April 15th - changed "
-                     "during the March 18th meeting.\" Time-aware retrieval "
-                     "that prevents stale-decision hallucinations."),
+                     "---\n\n"
+                     "[2026-11-13 | Venerdì 13 Novembre 2026 | Project: "
+                     "Project Alpha]\n"
+                     "[04:10 - 04:35] Tu: The deadline moves to April 15th."),
+            ("bullet", "Specific date: the LLM filters chunks by the exact "
+                       "YYYY-MM-DD anchor instead of relying on vector "
+                       "similarity alone."),
+            ("bullet", "Trend or date range: it aggregates meetings in "
+                       "chronological order rather than blending them."),
+            ("bullet", "Contradiction: the newest ISO timestamp wins as the "
+                       "current decision, while earlier history remains "
+                       "visible."),
+            ("highlight", "Click 'Optimize Workspace RAG Settings' in "
+                          "Settings to set topN=12, similarityThreshold=0.25 "
+                          "and the chronological system prompt. Auto-upload "
+                          "also applies these settings before each embedding; "
+                          "manual document pinning is not required."),
+        ],
+    },
+    {
+        "type": "card",
+        "icon": "🧠",
+        "title": "Whisper initial_prompt - domain vocabulary biasing",
+        "body": [
+            ("text", "In Settings, enter project names, product names, "
+                     "acronyms, technical terms, and exact spellings that "
+                     "Whisper often mishears. The same initial prompt is sent "
+                     "to both stereo transcription passes; it biases decoding "
+                     "without sending audio or transcripts anywhere."),
+            ("step", "Attach relevant project PDFs to an LLM you trust."),
+            ("step", "Click 'Copy PDF Extraction Prompt' in Settings, paste "
+                     "the copied meta-prompt into that LLM, and generate a "
+                     "compact vocabulary prompt."),
+            ("step", "Paste the result into 'Whisper Initial Prompt', keep it "
+                     "under 150 words, and click Save Settings."),
+            ("highlight", "Whisper's prompt context is about 224 tokens. "
+                          "Short vocabulary lists work best; long prose can "
+                          "crowd out useful audio context and reduce accuracy."),
         ],
     },
     {
@@ -651,7 +701,7 @@ class DocuStreamApp(ctk.CTk):
                         height=32).grid(row=2, column=1, pady=8, sticky="w")
 
         field(engine, 3, "Compute type",
-              "int8 on CPU = ultra-low RAM, ~3-5 min per hour of audio.")
+              "int8 on CPU = ultra-low RAM, ~3-5 min per channel-hour.")
         self.compute_var = ctk.StringVar(
             value=self.config.get("whisper_compute_type", "int8"))
         ctk.CTkComboBox(engine, values=["int8", "int8_float16", "float16",
@@ -659,8 +709,45 @@ class DocuStreamApp(ctk.CTk):
                         state="readonly", width=200, height=32
                         ).grid(row=3, column=1, pady=(8, 16), sticky="w")
 
+        # --- Whisper domain vocabulary card ---
+        vocabulary = self._settings_card(
+            scroll, 1, "📝", "Whisper Domain Vocabulary",
+            "Bias both stereo channels toward project terminology and exact "
+            "acronym spellings.")
+        ctk.CTkLabel(
+            vocabulary,
+            text="Whisper Initial Prompt (Domain Vocabulary & Acronyms)",
+            font=_font(12, "bold")).grid(
+                row=1, column=0, columnspan=3, padx=22, pady=(12, 4),
+                sticky="w")
+        self.initial_prompt_text = ctk.CTkTextbox(
+            vocabulary, height=120, wrap="word", font=_font(12),
+            corner_radius=8, border_width=1,
+            border_color=("gray75", "gray30"))
+        self.initial_prompt_text.grid(
+            row=2, column=0, columnspan=3, padx=22, pady=(0, 8), sticky="ew")
+        self.initial_prompt_text.insert(
+            "1.0", self.config.get("initial_prompt", ""))
+        self.initial_prompt_text.bind(
+            "<KeyRelease>", self._update_initial_prompt_counter)
+        self.initial_prompt_text.bind(
+            "<<Paste>>",
+            lambda _event: self.after_idle(
+                self._update_initial_prompt_counter))
+        prompt_footer = ctk.CTkFrame(vocabulary, fg_color="transparent")
+        prompt_footer.grid(row=3, column=0, columnspan=3, padx=22,
+                           pady=(0, 16), sticky="ew")
+        self.initial_prompt_counter = ctk.CTkLabel(
+            prompt_footer, text="", font=_font(11), text_color=TEXT_SUB)
+        self.initial_prompt_counter.pack(side="left")
+        ctk.CTkButton(
+            prompt_footer, text="📋  Copy PDF Extraction Prompt",
+            width=230, height=32, fg_color=GRAY_BTN, hover_color="#565656",
+            command=self._copy_pdf_extraction_prompt).pack(side="right")
+        self._update_initial_prompt_counter()
+
         # --- Safety guards card ---
-        guards = self._settings_card(scroll, 1, "🛡", "Safety Guards",
+        guards = self._settings_card(scroll, 2, "🛡", "Safety Guards",
                                      "Automatic stops that protect your "
                                      "disk and your recordings.")
         field(guards, 1, "Max call duration")
@@ -701,7 +788,7 @@ class DocuStreamApp(ctk.CTk):
                       ).grid(row=3, column=1, pady=(10, 16), sticky="w")
 
         # --- Storage card ---
-        storage = self._settings_card(scroll, 2, "💾", "Storage Retention",
+        storage = self._settings_card(scroll, 3, "💾", "Storage Retention",
                                       "Raw .wav cleanup. Markdown "
                                       "transcripts are always kept.")
         field(storage, 1, "Retention policy")
@@ -722,7 +809,7 @@ class DocuStreamApp(ctk.CTk):
                                      sticky="w")
 
         # --- AnythingLLM card ---
-        llm = self._settings_card(scroll, 3, "🔗", "AnythingLLM Integration",
+        llm = self._settings_card(scroll, 4, "🔗", "AnythingLLM Integration",
                                   "Optional bridge to your local RAG "
                                   "server and LanceDB.")
         field(llm, 1, "Base URL")
@@ -749,10 +836,15 @@ class DocuStreamApp(ctk.CTk):
         ping_row = ctk.CTkFrame(llm, fg_color="transparent")
         ping_row.grid(row=4, column=0, columnspan=3, padx=22, pady=(0, 16),
                       sticky="w")
-        ctk.CTkButton(ping_row, text="⚡  Test Connection", width=170,
+        ctk.CTkButton(ping_row, text="⚡  Test Connection", width=160,
                       height=34, fg_color=GRAY_BTN, hover_color="#565656",
                       command=self._on_test_connection
                       ).pack(side="left", padx=(0, 12))
+        self.optimize_rag_btn = ctk.CTkButton(
+            ping_row, text="🧭  Optimize Workspace RAG Settings", width=260,
+            height=34, fg_color=PURPLE, hover_color="#703688",
+            command=self._on_optimize_workspace)
+        self.optimize_rag_btn.pack(side="left", padx=(0, 12))
         self.ping_label = ctk.CTkLabel(ping_row, text="●  Not tested",
                                        font=_font(12, "bold"),
                                        text_color=TEXT_SUB)
@@ -763,7 +855,7 @@ class DocuStreamApp(ctk.CTk):
                       corner_radius=12, font=_font(15, "bold"),
                       fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._on_save_settings
-                      ).grid(row=4, column=0, padx=24, pady=(10, 16),
+                      ).grid(row=5, column=0, padx=24, pady=(10, 16),
                              sticky="ew")
 
     # --------------------------- Guide page --------------------------- #
@@ -927,6 +1019,26 @@ class DocuStreamApp(ctk.CTk):
             base_url=self.llm_url_var.get(),
             api_key=self.llm_key_var.get())
 
+    def _update_initial_prompt_counter(self, _event=None):
+        """Show live prompt size and warn above the recommended word count."""
+        text = self.initial_prompt_text.get("1.0", "end-1c")
+        words = len(text.split())
+        characters = len(text)
+        over_limit = words > 150
+        suffix = " · over the 150-word recommendation" if over_limit else ""
+        self.initial_prompt_counter.configure(
+            text=f"{words} words · {characters} characters{suffix}",
+            text_color=AMBER if over_limit else TEXT_SUB)
+
+    def _copy_pdf_extraction_prompt(self):
+        """Copy the PDF-to-vocabulary meta-prompt without reading any files."""
+        self.clipboard_clear()
+        self.clipboard_append(PDF_EXTRACTION_PROMPT)
+        self.update_idletasks()
+        self._log("PDF extraction prompt copied to the clipboard. Attach "
+                  "project PDFs to your preferred LLM and paste it there.")
+        self._toast("PDF extraction prompt copied", "success")
+
     def _set_state(self, state: str, log_line: str = ""):
         self.app_state = state
         # Immediate, unmistakable feedback for the user on every transition.
@@ -1038,7 +1150,8 @@ class DocuStreamApp(ctk.CTk):
                     self._set_state(
                         "RECORDING",
                         f"Recording started for project '{item[1]}'. "
-                        "Loopback + microphone capture active.")
+                        "Stereo capture active: left=Tu (microphone), "
+                        "right=Teams / Interlocutori (loopback).")
                 elif kind == "record_error":
                     self.recorder = None
                     self._set_state("ERROR",
@@ -1101,6 +1214,24 @@ class DocuStreamApp(ctk.CTk):
                 elif kind == "workspaces_error":
                     if not item[2]:
                         self._log(f"Workspace refresh failed: {item[1]}")
+                elif kind == "rag_optimized":
+                    self.optimize_rag_btn.configure(state="normal")
+                    settings = item[2]
+                    self.ping_label.configure(text="●  RAG OPTIMIZED",
+                                              text_color=GREEN)
+                    self._log(
+                        f"Workspace '{item[1]}' optimized: "
+                        f"topN={settings['topN']}, similarityThreshold="
+                        f"{settings['similarityThreshold']}, chronological "
+                        "system prompt installed.")
+                    self._toast("Workspace RAG settings optimized", "success")
+                elif kind == "rag_optimize_error":
+                    self.optimize_rag_btn.configure(state="normal")
+                    self.ping_label.configure(text="●  OPTIMIZATION FAILED",
+                                              text_color=RED)
+                    self._log(f"Workspace RAG optimization failed: {item[1]}")
+                    self._toast("RAG optimization failed - see Activity log",
+                                "error")
                 elif kind == "ping":
                     self.ping_label.configure(
                         text="●  ONLINE" if item[1]
@@ -1260,6 +1391,7 @@ class DocuStreamApp(ctk.CTk):
             compute_type=self.compute_var.get(),
             language=self.config.get("whisper_language", "auto"),
             beam_size=self.config.get("beam_size", 5),
+            initial_prompt=self.config.get("initial_prompt") or None,
         )
         transcribe_in_background(
             engine, self.current_wav,
@@ -1496,6 +1628,31 @@ class DocuStreamApp(ctk.CTk):
         threading.Thread(target=_worker, name="DocuStream-Ping",
                          daemon=True).start()
 
+    def _on_optimize_workspace(self):
+        """Apply the recommended chronological RAG settings off the UI thread."""
+        target = self.project_var.get().strip()
+        if not target:
+            self._toast("Select a Project / Workspace first", "warn")
+            return
+        client = self._client()
+        self.optimize_rag_btn.configure(state="disabled")
+        self.ping_label.configure(text="●  OPTIMIZING...",
+                                  text_color=TEXT_SUB)
+        self._log(f"Optimizing AnythingLLM Workspace '{target}': topN=12, "
+                  "similarityThreshold=0.25, chronological system prompt.")
+
+        def _worker():
+            try:
+                slug = self._resolve_workspace_slug(client, target)
+                settings = client.optimize_workspace_rag(slug)
+            except Exception as exc:
+                self.events.put(("rag_optimize_error", str(exc)))
+                return
+            self.events.put(("rag_optimized", target, settings))
+
+        threading.Thread(target=_worker, name="DocuStream-RAG-Optimize",
+                         daemon=True).start()
+
     # ------------------------------------------------------------------ #
     # Settings + lifecycle                                               #
     # ------------------------------------------------------------------ #
@@ -1513,6 +1670,9 @@ class DocuStreamApp(ctk.CTk):
         self.config.set("whisper_model", self.model_var.get())
         self.config.set("whisper_device", self.device_var.get())
         self.config.set("whisper_compute_type", self.compute_var.get())
+        self.config.set(
+            "initial_prompt",
+            self.initial_prompt_text.get("1.0", "end-1c").strip())
         self.config.set("max_call_duration_min", int(self.maxdur_var.get()))
         self.config.set("silence_timeout_min", int(self.silence_var.get()))
         self.config.set("silence_rms_threshold", float(self.rms_var.get()))

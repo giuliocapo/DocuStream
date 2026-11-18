@@ -22,9 +22,9 @@
 
 DocuStream is a **100% private Windows desktop companion** that turns any meeting or lecture into a searchable, time-anchored knowledge base:
 
-1. **🎧 Records everything you hear + everything you say.** It captures the WASAPI *loopback* (what Teams, Zoom, Google Meet, or any app plays through your speakers) **and** your physical microphone — simultaneously, mixed into one clean 24 kHz WAV. No meeting-app integration needed: *if you can hear it, DocuStream can record it.*
-2. **🧠 Transcribes 100% locally** with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`tiny` → `medium`, CPU `int8` or GPU). No cloud speech API, no account, no per-minute fees. Your conversations never leave your machine.
-3. **📚 Feeds AnythingLLM automatically.** Every transcript ships with an ISO 8601 metadata header and is pushed straight into the AnythingLLM **Workspace** you choose, where LanceDB embeds it for **Chronological RAG** — the retriever can order decisions over time instead of hallucinating stale answers.
+1. **🎧 Records everything you hear + everything you say — separately.** It captures the WASAPI *loopback* (what Teams, Zoom, Google Meet, or any app plays through your speakers) **and** your physical microphone into one **24 kHz, 16-bit stereo WAV**. Left/channel 0 is **Tu** (microphone); right/channel 1 is **Teams / Interlocutori** (loopback). No meeting-app integration needed: *if you can hear it, DocuStream can record it.*
+2. **🧠 Transcribes 100% locally with speaker separation.** One shared [faster-whisper](https://github.com/SYSTRAN/faster-whisper) model (`tiny` → `medium`, CPU `int8` or GPU) transcribes the two channels independently, then merges their segments chronologically. No cloud speech API, no account, no per-minute fees. Your conversations never leave your machine.
+3. **📚 Feeds date-aware AnythingLLM automatically.** Every transcript ships with strict ISO 8601 metadata, English/Italian date labels, and repeated date/project anchors that survive downstream chunking. Upload is followed immediately by Workspace embedding, and the recommended chronological retrieval settings are applied automatically.
 4. **📦 Runs from a single folder.** Python 3.11 embedded, no installer, no registry writes, no admin rights. Uninstall = delete the folder.
 
 ---
@@ -46,13 +46,14 @@ DocuStream is a **100% private Windows desktop companion** that turns any meetin
 
 | Area | Details |
 |---|---|
-| **Dual capture** | WASAPI loopback (system audio) + physical microphone, mixed with 0.85 headroom scaling — never clips, thread-safe ring buffers |
+| **True stereo dual capture** | 24 kHz / 16-bit / 2-channel PCM: left = microphone (**Tu**), right = WASAPI loopback (**Teams / Interlocutori**); no mono mixdown, thread-safe ring buffers |
 | **Device control** | Pick *which* output and *which* microphone to capture; live **VU level preview** lets you verify signal *before* recording |
-| **Automatic silence watchdog** | Gracefully stops after N minutes of silent system audio (default 8) |
+| **Automatic silence watchdog** | Gracefully stops after N minutes of silent right-channel loopback audio (default 8) |
 | **Hard timeout guard** | A recording can never exceed the configured ceiling (default 120 min) — protects your disk from a forgotten recording |
-| **Local transcription** | faster-whisper with model picker + download status indicator; auto-fallback from CUDA to CPU if the GPU runtime is missing |
-| **ISO 8601 metadata** | Every transcript gets a frontmatter header (`DATE_ISO`, `PROJECT`, `DURATION_MIN`, tags, participants) + per-segment `[HH:MM:SS]` timestamps |
-| **AnythingLLM bridge** | Ping / workspace discovery / document upload / `update-embeddings` — fully fail-soft (offline? transcript stays on disk, clear warning, no crash) |
+| **Local stereo transcription** | Two independent faster-whisper passes share one loaded model; chronological speaker merging; auto-fallback from CUDA to CPU if the GPU runtime is missing |
+| **Domain vocabulary biasing** | Persistent `initial_prompt` editor, live word/character counter, >150-word warning, and a PDF extraction meta-prompt clipboard helper |
+| **Date-aware chunk metadata** | Strict `published` / `DATE_ISO` values (`YYYY-MM-DDTHH:MM:SS`), English + Italian `DATE_HUMAN`, and repeated `[YYYY-MM-DD | … | Project: …]` anchors every ≤15 utterances or ~300 words |
+| **AnythingLLM bridge** | Ping / workspace discovery / document upload / immediate `update-embeddings`; automatic and on-button RAG tuning (`topN=12`, `similarityThreshold=0.25`, chronological system prompt) — fully fail-soft |
 | **Retention manager** | Raw `.wav` cleanup per policy (today / N days / after transcribe / forever); Markdown transcripts kept forever |
 | **Modern UI** | Dark CustomTkinter shell with sidebar, status pill, toast notifications, animated meters, styled in-app guide |
 | **Portable runtime** | `bootstrap_portable.bat` downloads the official Python 3.11 embeddable package + grafts Tkinter + installs deps — all inside the folder |
@@ -64,17 +65,18 @@ DocuStream is a **100% private Windows desktop companion** that turns any meetin
 ```
  +------------------------- WINDOWS DESKTOP -------------------------+
  |                                                                   |
- |  Teams / Zoom / Meet / Browser ──▶ WASAPI Loopback ──┐            |
- |  Your voice ────────────────────▶ WASAPI Mic ────────┤            |
+ |  Your voice ──▶ WASAPI Mic ──▶ ring buffer ──▶ LEFT  (Tu)         |
+ |  Teams / Zoom / Meet ─▶ WASAPI Loopback ─▶ RIGHT (Interlocutori)  |
  |                                                      ▼            |
  |                        +--------------------- audio_engine.py     |
- |                        |   ring buffers → downmix →               |
- |                        |   16-bit 24 kHz WAV (×0.85 headroom)     |
+ |                        |   2-channel, 16-bit, 24 kHz stereo WAV   |
  |                        ▼                                          |
  |                transcription_engine.py                            |
- |                  faster-whisper (offline) → ISO Markdown          |
+ |                  Split L/R → resample 16 kHz → shared Whisper     |
+ |                  Merge by start → ISO + repeated date anchors     |
  |                        ▼                                          |
  |                anythingllm_client.py                              |
+ |                  POST /workspace/{slug}/update (RAG tuning)       |
  |                  POST /document/upload                            |
  |                  POST /workspace/{slug}/update-embeddings         |
  |                        ▼  (HTTP localhost, optional)              |
@@ -120,11 +122,11 @@ python app.py
 - **Audio devices**: pick the *output* to record (loopback) and the *microphone*. Defaults are your Windows defaults — usually right. Click **🎚 Preview levels**, play some audio and talk: the **Output level** / **Mic level** bars dance if everything is wired correctly.
 
 **During the call**
-- **● Start Recording** → the REC dot pulses, the timer runs, and two animated meters show live loopback + mic signal.
+- **● Start Recording** → the REC dot pulses, the timer runs, and two animated meters show live loopback + mic signal. The WAV keeps them separate: **left = Tu**, **right = Teams / Interlocutori**.
 - Clicking does nothing for the first ~10s on a *cold* system? That's the audio drivers waking up — the button shows `⏳ Starting…`. Normal, once per boot.
 
 **When the call ends** — you have three honest choices:
-- **■ Finish & Process** → save the WAV, transcribe locally, and (if enabled) upload + embed into AnythingLLM. Watch the sidebar pill: `TRANSCRIBING` → `INGESTING` → `DONE`. Toast notifications confirm every step.
+- **■ Finish & Process** → save the stereo WAV, transcribe both channels locally with one shared Whisper model, merge the labeled segments by start time, and (if enabled) optimize + upload + immediately embed into AnythingLLM. Watch the sidebar pill: `TRANSCRIBING` → `INGESTING` → `DONE`. Toast notifications confirm every step.
 - **💾 Save Audio Only** → keep the WAV, skip Whisper entirely.
 - **🗑 Discard Call** → delete the audio immediately. No transcript, no trace.
 
@@ -137,21 +139,37 @@ python app.py
 
 ```markdown
 ---
-TITLE: Meeting Transcript - Project Alpha
-DATE_ISO: 2026-11-04T14:32:10
-PROJECT: Project Alpha
+TITLE: "Meeting Transcript - Project Alpha"
+published: 2026-11-13T14:32:10
+DATE_ISO: 2026-11-13T14:32:10
+DATE_HUMAN: "Friday 13 November 2026 / Venerdì 13 Novembre 2026"
+PROJECT: "Project Alpha"
 DURATION_MIN: 47.5
-ENGINE: faster-whisper-small
-SOURCE: DocuStream WASAPI Dual Capture
-LANGUAGE: en
-PARTICIPANTS: Alice, Bob, Carol
-TAGS: budget, q4
+ENGINE: "faster-whisper-small"
+SOURCE: DocuStream WASAPI Stereo Dual Capture
+LANGUAGE: "en"
+PARTICIPANTS: "Alice, Bob, Carol"
+TAGS: "budget, q4"
 ---
 
-[00:00:10 - 00:00:35] The deadline moves to April 15th...
+[2026-11-13 | Venerdì 13 Novembre 2026 | Project: Project Alpha]
+
+[04:10 - 04:35] Teams / Interlocutori: The original deadline was March 1st.
+[04:36 - 04:48] Tu: Decision changed — the deadline moves to April 15th.
 ```
 
-Ordered in time by `DATE_ISO`, anchored per-utterance by `[HH:MM:SS]` — see [Chronological RAG](#-anythingllm--chronological-rag).
+Both `published` and `DATE_ISO` always use locale-independent `YYYY-MM-DDTHH:MM:SS`, preventing AnythingLLM/JavaScript `Invalid date` errors caused by Windows `DD/MM/YYYY` formats. `DATE_HUMAN` is generated from fixed English/Italian calendars, not the Windows display locale.
+
+Segments are sorted by `start` and labeled **Tu** (left microphone) or **Teams / Interlocutori** (right loopback). Timestamps use `[MM:SS - MM:SS]`; minutes can exceed 59. Temporal anchors repeat every logical block of at most 15 utterances or approximately 300 words, so later AnythingLLM/LanceDB vector chunks retain the exact meeting date and project after the top YAML header is split away.
+
+### 3. Whisper domain vocabulary (`initial_prompt`)
+
+In **Settings → Whisper Domain Vocabulary**, use **Whisper Initial Prompt (Domain Vocabulary & Acronyms)** for exact project names, product names, technical terms, acronyms, and mixed Italian/English terminology. The saved prompt is passed to **both** stereo transcription calls.
+
+- Keep it concise: the live counter warns above **150 words** because Whisper's prompt context is approximately **224 tokens**.
+- Prefer a compact comma-separated vocabulary list and at most a couple of short example phrases over long prose.
+- Click **Copy PDF Extraction Prompt**, then paste that meta-prompt into an LLM where you have attached your project PDFs. It asks the LLM to return a concise domain prompt. DocuStream itself does **not** read or upload those PDFs.
+- Click **Save Settings** before recording/transcribing. An empty prompt disables biasing.
 
 ---
 
@@ -169,13 +187,20 @@ DocuStream is a bridge: it pushes transcripts into [AnythingLLM](https://anythin
    - API Key: paste it
    - Enable **Auto-upload after transcription**
    - Click **⚡ Test Connection** → you want `● ONLINE`
-5. On the Recorder page: **⟳ Refresh Workspaces**, pick the workspace, record as usual.
+5. On the Recorder page: **⟳ Refresh Workspaces**, pick the workspace. Return to Settings and click **🧭 Optimize Workspace RAG Settings** to configure that selected workspace immediately. Auto-upload also applies the same settings on every ingestion, so this button is mainly for existing workspaces or manual verification.
+6. Record as usual.
 
-From then on, **Finish & Process** = record → transcribe → upload → embed, one click. If AnythingLLM is offline, nothing is lost — the `.md` stays in `recordings/` and you get a clear warning.
+From then on, **Finish & Process** = record → stereo transcribe → RAG optimize → upload → immediately embed, one click. The exact `custom-documents/...` location returned by `/document/upload` is passed unchanged to `/workspace/{slug}/update-embeddings`. If AnythingLLM is offline, nothing is lost — the `.md` stays in `recordings/` and you get a clear warning.
 
-### Why the ISO timestamps matter (Chronological RAG)
+### Why repeated ISO timestamps matter (Chronological RAG)
 
-Without time anchors, an LLM retrieving *"the deadline is March 1st"* **and** *"deadline moved to April 15th"* may blend them into a hallucination. With `DATE_ISO` frontmatter the retriever can prefer the **newest** statement. When chatting in AnythingLLM, mention recency ("latest", "as of last week") to trigger time-aware answers.
+Pure semantic search does not understand that *November 13* is a filter. It can also retrieve *"the deadline is March 1st"* and *"deadline moved to April 15th"* together, then blend them into one wrong answer. DocuStream addresses this at both the document and Workspace layers:
+
+- **Every logical block carries its own anchor:** `[YYYY-MM-DD | Venerdì 13 Novembre 2026 | Project: …]`. This is essential because AnythingLLM typically splits long transcripts into ~400–500-word chunks, and chunks after the first do not contain YAML frontmatter.
+- **Retrieval is broad enough for chronology:** `POST /v1/workspace/{slug}/update` sets `topN` to **12** and `similarityThreshold` to **0.25**, allowing multi-date and full-meeting questions to retrieve enough context without manually pinning a document.
+- **The Workspace system prompt resolves time explicitly:** exact-date questions filter by the embedded `YYYY-MM-DD`; trends and ranges aggregate all relevant dates in order; contradictions prefer the most recent timestamp while retaining the earlier history.
+
+Ask naturally, for example: *"What happened on 2026-11-13?"*, *"Summarize decisions from 2026-11-01 through 2026-11-15 by date"*, or *"What is the latest deadline, and when did it change?"* ISO dates in questions are the least ambiguous, especially across Windows locales.
 
 ### Do I need a Vision model for this?
 
@@ -191,8 +216,9 @@ Without time anchors, an LLM retrieving *"the deadline is March 1st"* **and** *"
 |---|---|---|
 | `whisper_model` | `small` | `tiny` (~75 MB) / `base` (~145 MB) / `small` (~460 MB) / `medium` (~1.5 GB) |
 | `whisper_device` | `cpu` | `cpu` everywhere · `cuda` = NVIDIA GPU (falls back to CPU automatically if CUDA libs are missing) |
-| `whisper_compute_type` | `int8` | `int8` = ultra-low RAM on CPU (~3–5 min per hour of audio) |
+| `whisper_compute_type` | `int8` | `int8` = ultra-low RAM on CPU (~3–5 min per channel-hour) |
 | `beam_size` | `5` | Whisper decoding beam |
+| `initial_prompt` | `""` | Global domain vocabulary/acronym biasing prompt sent to both stereo channels; ≤150 words recommended |
 | `max_call_duration_min` | `120` | Hard timeout guard (slider 30–240) |
 | `silence_timeout_min` | `8` | Silence watchdog patience (slider 2–20) |
 | `silence_rms_threshold` | `120` | RMS level considered "silent" |
@@ -229,8 +255,8 @@ That's the design target: no admin rights, no installer, no drivers, no registry
 **Which meeting apps are supported?**
 All of them. DocuStream records what your **sound card plays** plus what your **microphone hears** — Teams, Zoom, Meet, Discord, browser lectures, anything.
 
-**Why 24 kHz mono?**
-Speech lives under ~8 kHz. 24 kHz keeps Whisper perfectly happy while a 1-hour meeting is ~5 MB of WAV.
+**Why 24 kHz stereo, and how large are files?**
+Speech lives under ~8 kHz. The recorder stores two uncompressed 24 kHz / 16-bit channels so speaker identity survives; transcription resamples each channel to Whisper's required 16 kHz array-input rate. A one-hour stereo recording is approximately **346 MB (330 MiB)**. Use the Retention Manager if raw WAV storage is a concern; Markdown transcripts are always kept.
 
 **Recording laws?**
 Vary by jurisdiction (one-party vs all-party consent). DocuStream is a tool — you are responsible for complying with the law and your organization's policies.
@@ -242,9 +268,9 @@ Vary by jurisdiction (one-party vs all-party consent). DocuStream is a tool — 
 ```
 DocuStream/
 ├── app.py                    # GUI — sidebar shell, recorder, settings, guide
-├── audio_engine.py           # WASAPI dual capture, watchdogs, level monitor
-├── transcription_engine.py   # faster-whisper worker, ISO Markdown, retention
-├── anythingllm_client.py     # AnythingLLM REST client (upload + embed)
+├── audio_engine.py           # stereo WASAPI capture, watchdogs, level monitor
+├── transcription_engine.py   # stereo Whisper, anchored ISO Markdown, retention
+├── anythingllm_client.py     # AnythingLLM RAG tuning + upload + immediate embed
 ├── config_manager.py         # atomic JSON config (never corrupts on crash)
 ├── config.default.json       # settings template
 ├── bootstrap_portable.bat    # zero-admin portable runtime installer

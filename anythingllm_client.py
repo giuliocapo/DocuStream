@@ -12,6 +12,8 @@ Endpoints covered:
 * POST /v1/document/upload                     - upload a transcript (.md)
 * POST /v1/workspace/{slug}/update-embeddings  - move the uploaded document
   into the Workspace and trigger vector (re)embedding.
+* POST /v1/workspace/{slug}/update             - tune retrieval depth,
+  similarity threshold and the chronological-resolution system prompt.
 
 Every method fails soft: errors raise ``AnythingLLMError`` with a
 human-readable message so the UI can warn the user and keep the transcript
@@ -28,6 +30,32 @@ import requests
 DEFAULT_BASE_URL = "http://localhost:3001/api/v1"
 REQUEST_TIMEOUT = (5, 60)     # (connect, read) seconds
 PING_TIMEOUT = (3, 5)
+
+# AnythingLLM sends this Workspace-level system prompt to the selected LLM.
+# It is deliberately strict: semantic similarity alone must not flatten
+# decisions from different meetings into one undated answer.
+CHRONOLOGICAL_RAG_PROMPT = """You are a chronological meeting knowledge assistant.
+DocuStream transcript chunks contain temporal anchors such as
+[YYYY-MM-DD | Venerdì 13 Novembre 2026 | Project: Example] and speaker labels
+"Tu" (the local microphone user) and "Teams / Interlocutori" (remote callers).
+
+Follow these rules for every answer:
+1. Treat the YYYY-MM-DD value in each anchor as the authoritative meeting date.
+   Never infer dates from Windows locale formats or from document order.
+2. For a question about a specific day, filter evidence strictly to chunks whose
+   anchor has that exact date. Group facts by date and cite YYYY-MM-DD explicitly.
+   If no chunk matches the requested date, say that no evidence was retrieved.
+3. For trends, timelines, comparisons, or summaries spanning multiple meetings,
+   aggregate all relevant dates in chronological order. Do not collapse separate
+   meetings into one event; distinguish changes, recurring topics, and outliers.
+4. When statements conflict across dates, prioritize the statement with the most
+   recent YYYY-MM-DD timestamp as the current decision. Mention the earlier value
+   and the date on which it changed when that history is relevant.
+5. Within one meeting, use the [MM:SS - MM:SS] ranges to preserve event order.
+   Keep claims attributed to "Tu" separate from "Teams / Interlocutori".
+6. Use only the retrieved evidence. State uncertainty or missing dates plainly
+   instead of inventing facts, and always include the relevant ISO dates.
+"""
 
 
 class AnythingLLMError(Exception):
@@ -158,6 +186,34 @@ class AnythingLLMClient:
                 f"{data.get('message', 'unknown error')}")
         return True
 
+    def optimize_workspace_rag(self, slug: str) -> dict:
+        """Apply date-aware retrieval settings to one AnythingLLM Workspace.
+
+        ``topN=12`` supplies enough snippets for multi-date aggregation;
+        ``similarityThreshold=0.25`` keeps exact-date questions from being
+        filtered out when their semantic similarity score is comparatively
+        low. The system prompt tells the LLM how to resolve those snippets.
+        """
+        if not slug:
+            raise AnythingLLMError("No workspace slug provided.")
+        payload = {
+            "topN": 12,
+            "similarityThreshold": 0.25,
+            "openAiPrompt": CHRONOLOGICAL_RAG_PROMPT,
+        }
+        data = self._request_json("POST", f"/workspace/{slug}/update", payload)
+        if isinstance(data, dict) and data.get("success") is False:
+            message = data.get("message") or data.get("error") or \
+                "unknown error"
+            raise AnythingLLMError(
+                f"Workspace RAG optimization rejected: {message}")
+        return {
+            "slug": slug,
+            "topN": 12,
+            "similarityThreshold": 0.25,
+            "openAiPrompt": CHRONOLOGICAL_RAG_PROMPT,
+        }
+
     # ``requests.request(headers=...)`` is set in _request; to inject
     # Content-Type for JSON posts we route through this tiny shim so the
     # public methods above stay one-liners.
@@ -187,12 +243,18 @@ class AnythingLLMClient:
     # ------------------------------------------------------------------ #
 
     def ingest_transcript(self, md_path, workspace_slug: str) -> str:
-        """Upload a transcript and embed it into ``workspace_slug``.
+        """Tune, upload, and immediately embed a transcript in one Workspace.
+
+        Retrieval settings are applied before upload so nothing interrupts the
+        required ``document/upload`` -> ``update-embeddings`` sequence. The
+        exact ``custom-documents/...`` location returned by AnythingLLM is sent
+        back unchanged in the embedding request.
 
         Returns the document location that was embedded. Raises
         AnythingLLMError on any failure - callers should catch it, keep the
         local .md, and inform the user.
         """
+        self.optimize_workspace_rag(workspace_slug)
         document = self.upload_document(md_path)
         location = document.get("location")
         if not location:
