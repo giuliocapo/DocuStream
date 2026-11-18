@@ -8,8 +8,9 @@ Captures two WASAPI sources simultaneously with zero administrator rights:
 
 Both streams run on dedicated capture threads that push PCM blocks into
 thread-safe ring buffers (``collections.deque``). On stop, the buffered audio
-is downmixed to 16-bit 24 kHz mono PCM WAV with a 0.85 headroom scale so a
-loud caller never clips the other participant's voice.
+is written as 16-bit 24 kHz stereo PCM WAV: the physical microphone is kept
+on the left channel and WASAPI loopback on the right channel. The two voices
+are never mixed, so Whisper can transcribe and attribute them independently.
 
 Safety guards:
 * Silence watchdog - if the loopback channel stays below the configured RMS
@@ -57,10 +58,9 @@ def create_pa_instance():
     return _new_pa()
 
 
-TARGET_RATE = 24000          # Whisper's preferred rate is 16 kHz; 24 kHz keeps
-                             # speech intelligible while halving 48 kHz files.
+TARGET_RATE = 24000          # Capture rate; transcription resamples each
+                             # channel to Whisper's required 16 kHz input.
 FRAMES_PER_BUFFER = 1024
-MIX_SCALE = 0.85             # Headroom factor; prevents clipping on the sum.
 LEVEL_REPORT_HZ = 15         # How often RMS levels are pushed to the UI.
 
 
@@ -456,7 +456,10 @@ class AudioRecorder:
             thread.start()
 
     def stop(self, output_dir: Path, project: str = "General") -> Path:
-        """Stop capture, downmix both buffers and write the final WAV file.
+        """Stop capture and write microphone + loopback as a stereo WAV.
+
+        Channel 0 (left) is the physical microphone (``Tu``); channel 1
+        (right) is WASAPI loopback (``Teams / Interlocutori``).
 
         Returns the path of the written ``.wav`` file. Safe to call multiple
         times; subsequent calls after the first raise RecorderError.
@@ -497,10 +500,12 @@ class AudioRecorder:
         loop_pcm = _pad_to(loop_pcm, length)
         mic_pcm = _pad_to(mic_pcm, length)
 
-        # Dual-channel downmix with headroom scaling (no clipping).
-        mixed = (loop_pcm + mic_pcm) * MIX_SCALE
-        mixed = np.clip(mixed, -1.0, 1.0)
-        pcm16 = (mixed * 32767.0).astype("<i2")  # little-endian int16
+        # Keep the sources separated: left = microphone, right = loopback.
+        # Clamp each source independently; unlike a mixdown, no attenuation
+        # is needed because the channels are never summed together.
+        stereo = np.column_stack((mic_pcm, loop_pcm)).astype(np.float32)
+        stereo = np.clip(stereo, -1.0, 1.0)
+        pcm16 = (stereo * 32767.0).astype("<i2")  # interleaved little-endian
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -509,7 +514,7 @@ class AudioRecorder:
         wav_path = output_dir / f"{stamp}_{safe_project}.wav"
 
         with wave.open(str(wav_path), "wb") as wav:
-            wav.setnchannels(1)
+            wav.setnchannels(2)
             wav.setsampwidth(2)          # 16-bit PCM
             wav.setframerate(TARGET_RATE)
             wav.writeframes(pcm16.tobytes())

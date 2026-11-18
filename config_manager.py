@@ -144,6 +144,7 @@ def _minimal_defaults() -> dict:
         "whisper_compute_type": "int8",
         "whisper_language": "auto",
         "beam_size": 5,
+        "initial_prompt": "",
         "max_call_duration_min": 120,
         "silence_timeout_min": 8,
         "silence_rms_threshold": 120.0,
